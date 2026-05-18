@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { memoryRepository } from '../modules/storage/repositories/MemoryRepository';
+import { memoryEngine } from '../modules/memory-engine/MemoryEngine';
 import { logger } from '../../src/shared/utils/logger';
 import type { MemoryCategory } from '../../shared-types/memory.types';
 
@@ -7,18 +7,19 @@ const router = Router();
 
 router.get('/', async (req, res) => {
   try {
-    const { category, minStrength, limit } = req.query;
+    const { category, limit } = req.query;
 
-    const query: Record<string, unknown> = {};
-    if (category) query.category = category as MemoryCategory;
-    if (minStrength) query.currentStrength = parseFloat(minStrength as string);
+    let memories;
+    if (category) {
+      memories = await memoryEngine.getMemoriesByCategory(category as MemoryCategory);
+    } else {
+      memories = await memoryEngine.getRecentMemories(limit ? parseInt(limit as string) : 50);
+    }
 
-    const memories = await memoryRepository.findMany(query);
-    const limitedMemories = limit 
-      ? memories.slice(0, parseInt(limit as string))
-      : memories;
-
-    res.json({ memories: limitedMemories });
+    res.json({ 
+      memories,
+      count: memories.length 
+    });
   } catch (error) {
     logger.error('Get memories error', error as Error);
     res.status(500).json({
@@ -28,10 +29,54 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/pinned', async (req, res) => {
+  try {
+    const memories = await memoryEngine.getPinnedMemories();
+    res.json({ 
+      memories,
+      count: memories.length 
+    });
+  } catch (error) {
+    logger.error('Get pinned memories error', error as Error);
+    res.status(500).json({
+      error: 'Failed to get pinned memories',
+      message: (error as Error).message,
+    });
+  }
+});
+
+router.get('/context', async (req, res) => {
+  try {
+    const { query, categories } = req.query;
+
+    if (!query || typeof query !== 'string') {
+      res.status(400).json({ error: 'Query parameter is required' });
+      return;
+    }
+
+    const categoryList = categories 
+      ? (categories as string).split(',') as MemoryCategory[]
+      : undefined;
+
+    const results = await memoryEngine.retrieveContext(query, categoryList);
+
+    res.json({ 
+      results,
+      count: results.length 
+    });
+  } catch (error) {
+    logger.error('Get memory context error', error as Error);
+    res.status(500).json({
+      error: 'Failed to get memory context',
+      message: (error as Error).message,
+    });
+  }
+});
+
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const memory = await memoryRepository.findById(id);
+    const memory = await memoryEngine.getMemoryById(id);
 
     if (!memory) {
       res.status(404).json({ error: 'Memory not found' });
@@ -50,29 +95,25 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { category, content, importanceScore, emotionalWeight, emotionalContext } = req.body;
+    const { content, category, emotionalState } = req.body;
 
-    if (!category || !content) {
-      res.status(400).json({ error: 'Category and content are required' });
+    if (!content || !category) {
+      res.status(400).json({ error: 'Content and category are required' });
       return;
     }
 
-    const memory = await memoryRepository.create({
-      category,
+    const defaultEmotionalState = {
+      mood: 0,
+      energy: 0.5,
+      trust: 0.5,
+      affection: 0.5,
+    };
+
+    const memory = await memoryEngine.createMemory(
       content,
-      embedding: null,
-      importanceScore: importanceScore || 0.5,
-      emotionalWeight: emotionalWeight || 0.5,
-      accessCount: 0,
-      lastAccessedAt: null,
-      decayRate: getDecayRateForCategory(category),
-      currentStrength: 1.0,
-      isPinned: false,
-      emotionalContext: emotionalContext || { mood: 0, energy: 0.5, trust: 0.5, affection: 0.5 },
-      userMood: null,
-      relatedMemoryIds: [],
-      source: 'conversation',
-    });
+      category,
+      emotionalState || defaultEmotionalState
+    );
 
     res.status(201).json({ memory });
   } catch (error) {
@@ -89,7 +130,7 @@ router.patch('/:id', async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
-    const memory = await memoryRepository.update(id, updates);
+    const memory = await memoryEngine.updateMemory(id, updates);
 
     if (!memory) {
       res.status(404).json({ error: 'Memory not found' });
@@ -106,10 +147,72 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
+router.post('/:id/pin', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const memory = await memoryEngine.pinMemory(id);
+
+    if (!memory) {
+      res.status(404).json({ error: 'Memory not found' });
+      return;
+    }
+
+    res.json({ memory });
+  } catch (error) {
+    logger.error('Pin memory error', error as Error);
+    res.status(500).json({
+      error: 'Failed to pin memory',
+      message: (error as Error).message,
+    });
+  }
+});
+
+router.post('/:id/unpin', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const memory = await memoryEngine.unpinMemory(id);
+
+    if (!memory) {
+      res.status(404).json({ error: 'Memory not found' });
+      return;
+    }
+
+    res.json({ memory });
+  } catch (error) {
+    logger.error('Unpin memory error', error as Error);
+    res.status(500).json({
+      error: 'Failed to unpin memory',
+      message: (error as Error).message,
+    });
+  }
+});
+
+router.post('/:id/boost', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { amount } = req.body;
+
+    const memory = await memoryEngine.boostMemory(id, amount);
+
+    if (!memory) {
+      res.status(404).json({ error: 'Memory not found' });
+      return;
+    }
+
+    res.json({ memory });
+  } catch (error) {
+    logger.error('Boost memory error', error as Error);
+    res.status(500).json({
+      error: 'Failed to boost memory',
+      message: (error as Error).message,
+    });
+  }
+});
+
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await memoryRepository.delete(id);
+    await memoryEngine.deleteMemory(id);
     res.status(204).send();
   } catch (error) {
     logger.error('Delete memory error', error as Error);
@@ -120,15 +223,17 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-function getDecayRateForCategory(category: MemoryCategory): number {
-  const decayRates: Record<MemoryCategory, number> = {
-    profile: 0.001,
-    emotional: 0.005,
-    episodic: 0.02,
-    relationship: 0.003,
-    preference: 0.01,
-  };
-  return decayRates[category] || 0.01;
-}
+router.post('/run-decay', async (req, res) => {
+  try {
+    const result = await memoryEngine.runDecayCycle();
+    res.json({ result });
+  } catch (error) {
+    logger.error('Run decay cycle error', error as Error);
+    res.status(500).json({
+      error: 'Failed to run decay cycle',
+      message: (error as Error).message,
+    });
+  }
+});
 
 export default router;
